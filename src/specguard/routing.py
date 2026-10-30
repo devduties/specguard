@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 from urllib.parse import unquote_to_bytes, urlsplit
 
@@ -16,6 +17,20 @@ class OperationMatch:
     method: str
     operation: dict[str, Any]
     path_parameters: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class PathToken:
+    value: str
+    is_parameter: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RouteCandidate:
+    path_template: str
+    path_item: dict[str, Any]
+    path_parameters: dict[str, str]
+    specificity: tuple[tuple[int, ...], ...]
 
 
 class RouteNotFoundError(LookupError):
@@ -88,9 +103,7 @@ def resolve_operation(
         _strict_unquote(segment, InvalidRequestTargetError, "request path")
         for segment in _segments(request_path)
     )
-    candidates: list[
-        tuple[tuple[tuple[int, ...], ...], str, dict[str, Any], dict[str, str]]
-    ] = []
+    candidates: list[RouteCandidate] = []
 
     for template, path_item in paths.items():
         if not isinstance(template, str) or not template.startswith("/"):
@@ -103,37 +116,33 @@ def resolve_operation(
         if parameters is None:
             continue
 
-        specificity = tuple(
-            _segment_specificity(segment) for segment in template_segments
-        )
+        specificity = tuple(_segment_specificity(segment) for segment in template_segments)
         path_item = _resolve_path_item(document, path_item)
-        candidates.append((specificity, template, path_item, parameters))
+        candidates.append(RouteCandidate(template, path_item, parameters, specificity))
 
     if not candidates:
         raise RouteNotFoundError(f"No OpenAPI path matches '{request_path}'.")
 
     # Compare each path segment from left to right, with literal text ahead of
     # parameter expressions. Reject equal best scores instead of using spec order.
-    best_specificity = max(candidate[0] for candidate in candidates)
+    best_specificity = max(candidate.specificity for candidate in candidates)
     best_candidates = [
-        candidate for candidate in candidates if candidate[0] == best_specificity
+        candidate for candidate in candidates if candidate.specificity == best_specificity
     ]
     if len(best_candidates) > 1:
-        ordered_candidates = sorted(best_candidates, key=lambda candidate: candidate[1])
-        routes = ", ".join(f"'{candidate[1]}'" for candidate in ordered_candidates)
-        raise AmbiguousRouteError(
-            f"Ambiguous OpenAPI routes match '{request_path}': {routes}."
-        )
+        ordered_candidates = sorted(best_candidates, key=lambda candidate: candidate.path_template)
+        routes = ", ".join(f"'{candidate.path_template}'" for candidate in ordered_candidates)
+        raise AmbiguousRouteError(f"Ambiguous OpenAPI routes match '{request_path}': {routes}.")
 
-    _, template, path_item, parameters = best_candidates[0]
-    method_key, operation = _find_operation(path_item, request_method)
+    selected = best_candidates[0]
+    method_key, operation = _find_operation(selected.path_item, request_method)
     if not isinstance(operation, dict):
         raise MethodNotAllowedError(
             request_method,
-            _allowed_methods(path_item),
+            _allowed_methods(selected.path_item),
         )
 
-    return OperationMatch(template, method_key, operation, parameters)
+    return OperationMatch(selected.path_template, method_key, operation, selected.path_parameters)
 
 
 def _request_path(request_target: str) -> str:
@@ -172,11 +181,12 @@ def _segments(path: str) -> list[str]:
     return path.removeprefix("/").split("/")
 
 
-def _compile_path_template(template: str) -> list[list[tuple[str, bool]]]:
-    compiled: list[list[tuple[str, bool]]] = []
+@lru_cache(maxsize=512)
+def _compile_path_template(template: str) -> tuple[tuple[PathToken, ...], ...]:
+    compiled: list[tuple[PathToken, ...]] = []
     seen_parameters: set[str] = set()
     for segment in _segments(template):
-        tokens: list[tuple[str, bool]] = []
+        tokens: list[PathToken] = []
         cursor = 0
         for expression in _PATH_PARAMETER.finditer(segment):
             literal = segment[cursor : expression.start()]
@@ -186,9 +196,8 @@ def _compile_path_template(template: str) -> list[list[tuple[str, bool]]]:
                 )
             if literal:
                 tokens.append(
-                    (
+                    PathToken(
                         _strict_unquote(literal, InvalidPathTemplateError, "path template"),
-                        False,
                     )
                 )
 
@@ -198,42 +207,37 @@ def _compile_path_template(template: str) -> list[list[tuple[str, bool]]]:
                     f"Path parameter '{parameter_name}' appears more than once in '{template}'."
                 )
             seen_parameters.add(parameter_name)
-            tokens.append((parameter_name, True))
+            tokens.append(PathToken(parameter_name, is_parameter=True))
             cursor = expression.end()
 
         literal = segment[cursor:]
         if "{" in literal or "}" in literal:
-            raise InvalidPathTemplateError(
-                f"Malformed path parameter expression in '{template}'."
-            )
+            raise InvalidPathTemplateError(f"Malformed path parameter expression in '{template}'.")
         if literal:
             tokens.append(
-                (
+                PathToken(
                     _strict_unquote(literal, InvalidPathTemplateError, "path template"),
-                    False,
                 )
             )
-        compiled.append(tokens)
-    return compiled
+        compiled.append(tuple(tokens))
+    return tuple(compiled)
 
 
-def _segment_specificity(segment: list[tuple[str, bool]]) -> tuple[int, ...]:
+def _segment_specificity(segment: tuple[PathToken, ...]) -> tuple[int, ...]:
     score: list[int] = []
-    for value, is_parameter in segment:
-        score.extend((0,) if is_parameter else (1,) * len(value))
+    for token in segment:
+        score.extend((0,) if token.is_parameter else (1,) * len(token.value))
     return tuple(score)
 
 
 def _match_path(
-    template_segments: list[list[tuple[str, bool]]], request_segments: tuple[str, ...]
+    template_segments: tuple[tuple[PathToken, ...], ...], request_segments: tuple[str, ...]
 ) -> dict[str, str] | None:
     if len(template_segments) != len(request_segments):
         return None
 
     parameters: dict[str, str] = {}
-    for template_segment, request_segment in zip(
-        template_segments, request_segments, strict=True
-    ):
+    for template_segment, request_segment in zip(template_segments, request_segments, strict=True):
         matched = _match_segment(template_segment, request_segment)
         if matched is None:
             return None
@@ -241,7 +245,7 @@ def _match_path(
     return parameters
 
 
-def _match_segment(tokens: list[tuple[str, bool]], text: str) -> dict[str, str] | None:
+def _match_segment(tokens: tuple[PathToken, ...], text: str) -> dict[str, str] | None:
     """Match the entire segment without regex backtracking.
 
     Suffix reachability takes O(tokens * characters) states. Reconstruction
@@ -251,28 +255,30 @@ def _match_segment(tokens: list[tuple[str, bool]], text: str) -> dict[str, str] 
     suffixes = [bytearray(size + 1) for _ in range(len(tokens) + 1)]
     suffixes[-1][size] = 1
     for index in range(len(tokens) - 1, -1, -1):
-        value, is_parameter = tokens[index]
+        token = tokens[index]
         row, following = suffixes[index], suffixes[index + 1]
         for offset in range(size, -1, -1):
-            if is_parameter:
+            if token.is_parameter:
                 row[offset] = offset < size and (following[offset + 1] or row[offset + 1])
             else:
-                end = offset + len(value)
-                row[offset] = end <= size and following[end] and text.startswith(value, offset)
+                end = offset + len(token.value)
+                row[offset] = (
+                    end <= size and following[end] and text.startswith(token.value, offset)
+                )
     if not suffixes[0][0]:
         return None
 
     parameters: dict[str, str] = {}
     offset = 0
-    for index, (value, is_parameter) in enumerate(tokens):
-        if is_parameter:
+    for index, token in enumerate(tokens):
+        if token.is_parameter:
             end = offset + 1
             while not suffixes[index + 1][end]:
                 end += 1
-            parameters[value] = text[offset:end]
+            parameters[token.value] = text[offset:end]
             offset = end
         else:
-            offset += len(value)
+            offset += len(token.value)
     return parameters
 
 
@@ -318,27 +324,19 @@ def _json_pointer_target(document: dict[str, Any], reference: str) -> Any:
         token = token.replace("~1", "/").replace("~0", "~")
         if isinstance(target, dict):
             if token not in target:
-                raise PathItemReferenceError(
-                    f"Path Item reference '{reference}' does not resolve."
-                )
+                raise PathItemReferenceError(f"Path Item reference '{reference}' does not resolve.")
             target = target[token]
         elif isinstance(target, list) and token.isdigit() and str(int(token)) == token:
             index = int(token)
             if index >= len(target):
-                raise PathItemReferenceError(
-                    f"Path Item reference '{reference}' does not resolve."
-                )
+                raise PathItemReferenceError(f"Path Item reference '{reference}' does not resolve.")
             target = target[index]
         else:
-            raise PathItemReferenceError(
-                f"Path Item reference '{reference}' does not resolve."
-            )
+            raise PathItemReferenceError(f"Path Item reference '{reference}' does not resolve.")
     return target
 
 
-def _find_operation(
-    path_item: dict[str, Any], request_method: str
-) -> tuple[str, Any]:
+def _find_operation(path_item: dict[str, Any], request_method: str) -> tuple[str, Any]:
     normalized_method = request_method.lower()
     if normalized_method in _HTTP_METHODS:
         return normalized_method, path_item.get(normalized_method)
@@ -351,9 +349,7 @@ def _find_operation(
 
 def _allowed_methods(path_item: dict[str, Any]) -> tuple[str, ...]:
     standard = [
-        method.upper()
-        for method in _HTTP_METHODS
-        if isinstance(path_item.get(method), dict)
+        method.upper() for method in _HTTP_METHODS if isinstance(path_item.get(method), dict)
     ]
     additional = path_item.get("additionalOperations")
     if not isinstance(additional, dict):

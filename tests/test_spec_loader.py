@@ -12,9 +12,7 @@ def _valid_spec(version: str = "3.0.3") -> dict[str, object]:
     return {
         "openapi": version,
         "info": {"title": "Example API", "version": "1.0.0"},
-        "paths": {
-            "/health": {"get": {"responses": {"200": {"description": "healthy"}}}}
-        },
+        "paths": {"/health": {"get": {"responses": {"200": {"description": "healthy"}}}}},
     }
 
 
@@ -142,9 +140,11 @@ def test_preserves_default_response_and_server_variable(tmp_path: Path) -> None:
 
 def test_validates_schema_property_named_default(tmp_path: Path) -> None:
     spec = _valid_spec("3.1.0")
-    spec["components"] = {"schemas": {"Payload": {
-        "type": "object", "properties": {"default": {"type": "invalid-type"}}
-    }}}
+    spec["components"] = {
+        "schemas": {
+            "Payload": {"type": "object", "properties": {"default": {"type": "invalid-type"}}}
+        }
+    }
     path = tmp_path / "spec.json"
     path.write_text(json.dumps(spec), encoding="utf-8")
     with pytest.raises(SpecLoadError, match="Invalid OpenAPI spec"):
@@ -156,7 +156,8 @@ def test_rejects_cyclic_yaml_alias_with_load_error(tmp_path: Path) -> None:
     path.write_text(
         "openapi: 3.1.0\ninfo: {title: t, version: '1'}\npaths: {}\n"
         "components:\n  schemas:\n    Node: &node\n      type: object\n"
-        "      properties:\n        child: *node\n", encoding="utf-8",
+        "      properties:\n        child: *node\n",
+        encoding="utf-8",
     )
     with pytest.raises(SpecLoadError, match="Cyclic YAML aliases"):
         load_openapi_spec(path)
@@ -205,3 +206,96 @@ def test_json_schema_default_is_an_annotation(tmp_path: Path, version: str) -> N
     path = tmp_path / "spec.json"
     path.write_text(json.dumps(spec), encoding="utf-8")
     assert load_openapi_spec(path) == spec
+
+
+@pytest.mark.parametrize("version", ["3.0.3", "3.1.0", "3.2.0"])
+def test_default_ref_field_is_payload_data(tmp_path: Path, version: str) -> None:
+    spec = _valid_spec(version)
+    spec["components"] = {
+        "schemas": {
+            "Payload": {
+                "type": "object",
+                "properties": {"$ref": {"type": "string"}},
+                "default": {"$ref": "customer-provided-value"},
+            }
+        }
+    }
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    assert load_openapi_spec(path) == spec
+
+
+@pytest.mark.parametrize("count", [42, "invalid"])
+def test_default_validation_resolves_local_schema_references(tmp_path: Path, count: object) -> None:
+    spec = _valid_spec("3.0.3")
+    spec["components"] = {
+        "schemas": {
+            "Count": {"type": "integer"},
+            "Payload": {
+                "type": "object",
+                "properties": {"count": {"$ref": "#/components/schemas/Count"}},
+                "default": {"count": count},
+            },
+        }
+    }
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    if count == "invalid":
+        with pytest.raises(SpecLoadError, match="Invalid OpenAPI spec"):
+            load_openapi_spec(path)
+    else:
+        assert load_openapi_spec(path) == spec
+
+
+@pytest.mark.parametrize("location", ["schema", "itemSchema", "component"])
+def test_rejects_external_references_in_media_schemas(tmp_path: Path, location: str) -> None:
+    spec = _valid_spec("3.2.0")
+    media = {"itemSchema" if location == "component" else location: {"$ref": "outside.yaml"}}
+    if location == "component":
+        spec["components"] = {"mediaTypes": {"Events": media}}
+    else:
+        spec["paths"]["/health"]["get"]["responses"]["200"]["content"] = {
+            "application/jsonl": media
+        }
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(SpecLoadError, match=r"External \$ref.*outside.yaml"):
+        load_openapi_spec(path)
+
+
+@pytest.mark.parametrize("section", ["parameters", "responses", "callbacks", "pathItems"])
+def test_rejects_external_references_in_component_objects(tmp_path: Path, section: str) -> None:
+    spec = _valid_spec("3.1.0")
+    spec["components"] = {section: {"Shared": {"$ref": "outside.yaml"}}}
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(SpecLoadError, match=r"External \$ref.*outside.yaml"):
+        load_openapi_spec(path)
+
+
+def test_response_and_webhook_extensions_remain_payload_data(tmp_path: Path) -> None:
+    spec = _valid_spec("3.1.0")
+    spec["webhooks"] = {"x-payload": {"$ref": "literal-extension"}}
+    spec["paths"]["/health"]["get"]["responses"]["x-payload"] = {
+        "$ref": "literal-extension",
+        "content": {"application/json": {"schema": {"$ref": "also-literal"}}},
+    }
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    assert load_openapi_spec(path) == spec
+
+
+def test_schema_property_with_x_prefix_is_still_validated(tmp_path: Path) -> None:
+    spec = _valid_spec("3.1.0")
+    spec["components"] = {
+        "schemas": {
+            "Payload": {
+                "type": "object",
+                "properties": {"x-count": {"$ref": "outside.yaml"}},
+            }
+        }
+    }
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(SpecLoadError, match=r"External \$ref.*outside.yaml"):
+        load_openapi_spec(path)
