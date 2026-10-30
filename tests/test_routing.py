@@ -1,6 +1,7 @@
 import pytest
 
 from specguard.routing import (
+    AmbiguousRouteError,
     MethodNotAllowedError,
     RouteNotFoundError,
     match_operation,
@@ -37,6 +38,62 @@ def test_prefers_literal_route_to_parameterized_route() -> None:
     assert match is not None
     assert match.path_template == "/reports/latest"
     assert match.operation["operationId"] == "getLatestReport"
+
+
+@pytest.mark.parametrize(
+    "paths",
+    [
+        {
+            "/a/{x}": {"get": {"operationId": "leftLiteral"}},
+            "/{y}/b": {"get": {"operationId": "rightLiteral"}},
+        },
+        {
+            "/{y}/b": {"get": {"operationId": "rightLiteral"}},
+            "/a/{x}": {"get": {"operationId": "leftLiteral"}},
+        },
+    ],
+)
+def test_prefers_leftmost_literal_segment_independent_of_spec_order(
+    paths: dict[str, dict[str, dict[str, str]]],
+) -> None:
+    match = resolve_operation({"paths": paths}, "/a/b", "GET")
+
+    assert match.path_template == "/a/{x}"
+    assert match.operation["operationId"] == "leftLiteral"
+
+
+@pytest.mark.parametrize(
+    "paths",
+    [
+        {
+            "/a/{x}": {"get": {"operationId": "first"}},
+            "/a/{y}": {"get": {"operationId": "second"}},
+        },
+        {
+            "/a/{y}": {"get": {"operationId": "second"}},
+            "/a/{x}": {"get": {"operationId": "first"}},
+        },
+    ],
+)
+def test_reports_ambiguous_routes_instead_of_using_spec_order(
+    paths: dict[str, dict[str, dict[str, str]]],
+) -> None:
+    with pytest.raises(AmbiguousRouteError) as error:
+        resolve_operation({"paths": paths}, "/a/b", "GET")
+
+    assert str(error.value) == "Ambiguous OpenAPI routes match '/a/b': '/a/{x}', '/a/{y}'."
+
+
+def test_match_operation_propagates_ambiguous_route_error() -> None:
+    document = {
+        "paths": {
+            "/a/{x}": {"get": {"operationId": "first"}},
+            "/a/{y}": {"get": {"operationId": "second"}},
+        }
+    }
+
+    with pytest.raises(AmbiguousRouteError):
+        match_operation(document, "/a/b", "GET")
 
 
 def test_returns_none_when_method_is_not_defined() -> None:
