@@ -1,8 +1,13 @@
+import subprocess
+import sys
+
 import pytest
 
 from specguard.routing import (
     AmbiguousRouteError,
+    InvalidRequestTargetError,
     MethodNotAllowedError,
+    PathItemReferenceError,
     RouteNotFoundError,
     match_operation,
     resolve_operation,
@@ -116,6 +121,35 @@ def test_ignores_query_string_and_decodes_path_parameter() -> None:
     assert match.path_parameters == {"order_id": "order/42"}
 
 
+def test_preserves_leading_double_slash_in_origin_form_request_target() -> None:
+    document = {
+        "paths": {
+            "//tenant/health": {"get": {"operationId": "tenantHealth"}},
+            "/health": {"get": {"operationId": "health"}},
+        }
+    }
+
+    match = resolve_operation(document, "//tenant/health?full=true", "GET")
+
+    assert match.path_template == "//tenant/health"
+    assert match.operation["operationId"] == "tenantHealth"
+
+
+def test_extracts_path_from_absolute_request_url() -> None:
+    document = {"paths": {"/health": {"get": {"operationId": "health"}}}}
+
+    match = resolve_operation(document, "https://api.example/health?full=true", "GET")
+
+    assert match.path_template == "/health"
+
+
+def test_skips_non_path_extension_fields() -> None:
+    document = {"paths": {"x-internal": {"get": {"operationId": "internal"}}}}
+
+    with pytest.raises(RouteNotFoundError):
+        resolve_operation(document, "/x-internal", "GET")
+
+
 def test_trailing_slash_is_not_treated_as_the_same_route() -> None:
     document = {"paths": {"/orders": {"get": {"operationId": "listOrders"}}}}
 
@@ -150,3 +184,157 @@ def test_literal_route_is_selected_before_method_check() -> None:
         resolve_operation(document, "/reports/latest", "GET")
 
     assert error.value.allowed_methods == ("POST",)
+
+
+def test_resolves_internal_path_item_reference() -> None:
+    document = {
+        "paths": {"/health": {"$ref": "#/components/pathItems/Health"}},
+        "components": {
+            "pathItems": {"Health": {"get": {"operationId": "health"}}}
+        },
+    }
+
+    match = resolve_operation(document, "/health", "GET")
+
+    assert match.operation["operationId"] == "health"
+
+
+def test_resolves_escaped_tokens_in_path_item_reference() -> None:
+    document = {
+        "paths": {"/health": {"$ref": "#/components/pathItems/Health~1Live~0"}},
+        "components": {
+            "pathItems": {"Health/Live~": {"get": {"operationId": "health"}}}
+        },
+    }
+
+    match = resolve_operation(document, "/health", "GET")
+
+    assert match.operation["operationId"] == "health"
+
+
+def test_missing_path_item_reference_target_has_clear_error() -> None:
+    document = {"paths": {"/health": {"$ref": "#/components/pathItems/Missing"}}}
+
+    with pytest.raises(PathItemReferenceError, match="does not resolve"):
+        resolve_operation(document, "/health", "GET")
+
+
+def test_path_item_reference_cycle_has_clear_error() -> None:
+    document = {
+        "paths": {
+            "/a": {"$ref": "#/paths/~1b"},
+            "/b": {"$ref": "#/paths/~1a"},
+        }
+    }
+
+    with pytest.raises(PathItemReferenceError, match="Cyclic Path Item references"):
+        resolve_operation(document, "/a", "GET")
+
+
+def test_matches_and_extracts_parameters_embedded_in_path_segments() -> None:
+    document = {
+        "paths": {
+            "/files/{year}-{name}.json": {
+                "get": {"operationId": "getArchiveFile"}
+            }
+        }
+    }
+
+    match = resolve_operation(document, "/files/2026-report.json", "GET")
+
+    assert match.path_parameters == {"year": "2026", "name": "report"}
+
+
+def test_literal_suffix_in_embedded_template_wins_over_broad_parameter() -> None:
+    document = {
+        "paths": {
+            "/files/{name}": {"get": {"operationId": "getAnyFile"}},
+            "/files/{name}.json": {"get": {"operationId": "getJsonFile"}},
+        }
+    }
+
+    match = resolve_operation(document, "/files/report.json", "GET")
+
+    assert match.path_template == "/files/{name}.json"
+    assert match.path_parameters == {"name": "report"}
+
+
+def test_resolves_query_and_additional_operations_preserving_method_case() -> None:
+    document = {
+        "paths": {
+            "/items": {
+                "get": {"operationId": "getItems"},
+                "query": {"operationId": "queryItems"},
+                "additionalOperations": {"COPY": {"operationId": "copyItems"}},
+            }
+        }
+    }
+
+    query = resolve_operation(document, "/items", "QUERY")
+    copy = resolve_operation(document, "/items", "COPY")
+
+    assert query.method == "query"
+    assert query.operation["operationId"] == "queryItems"
+    assert copy.method == "COPY"
+    assert copy.operation["operationId"] == "copyItems"
+
+
+def test_allowed_methods_include_query_and_additional_operations() -> None:
+    document = {
+        "paths": {
+            "/items": {
+                "get": {"operationId": "getItems"},
+                "query": {"operationId": "queryItems"},
+                "additionalOperations": {"COPY": {"operationId": "copyItems"}},
+            }
+        }
+    }
+
+    with pytest.raises(MethodNotAllowedError) as error:
+        resolve_operation(document, "/items", "DELETE")
+
+    assert error.value.allowed_methods == ("GET", "QUERY", "COPY")
+
+
+@pytest.mark.parametrize("request_path", ["/items/%FF", "/items/%GG"])
+def test_rejects_invalid_percent_encoded_request_path(request_path: str) -> None:
+    document = {"paths": {"/items/�": {"get": {"operationId": "replacement"}}}}
+
+    with pytest.raises(InvalidRequestTargetError) as error:
+        resolve_operation(document, request_path, "GET")
+
+    assert error.value.status_code == 400
+
+
+def test_encoded_newline_does_not_match_literal_route() -> None:
+    document = {"paths": {"/health": {"get": {}}}}
+    with pytest.raises(RouteNotFoundError):
+        resolve_operation(document, "/health%0A", "GET")
+
+
+@pytest.mark.parametrize("encoded, decoded", [("a%0A", "a\n"), ("a%0Ab", "a\nb")])
+def test_encoded_newline_is_preserved_in_parameter(encoded: str, decoded: str) -> None:
+    document = {"paths": {"/items/{id}": {"get": {}}}}
+    assert resolve_operation(document, f"/items/{encoded}", "GET").path_parameters == {
+        "id": decoded
+    }
+
+
+def test_many_embedded_parameters_have_bounded_matching_time() -> None:
+    # Isolate the deadline so a regression cannot hang the pytest process.
+    code = """
+from specguard.routing import RouteNotFoundError, resolve_operation
+document = {'paths': {'/{a}{b}{c}{d}{e}Z': {'get': {}}}}
+try:
+    resolve_operation(document, '/' + 'x' * 400, 'GET')
+except RouteNotFoundError:
+    pass
+else:
+    raise AssertionError('Unexpected match')
+"""
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=5, capture_output=True)
+
+
+def test_adjacent_parameters_preserve_shortest_successful_captures() -> None:
+    document = {"paths": {"/{a}{b}Z": {"get": {}}}}
+    assert resolve_operation(document, "/abcZ", "GET").path_parameters == {"a": "a", "b": "bc"}

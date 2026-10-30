@@ -92,6 +92,35 @@ def test_rejects_external_references(tmp_path: Path) -> None:
         load_openapi_spec(spec_path)
 
 
+def test_keeps_example_default_and_extension_payloads_as_data(tmp_path: Path) -> None:
+    spec = _valid_spec("3.1.0")
+    spec["x-example-payload"] = {"$ref": "customer-provided-extension-value"}
+    spec["components"] = {
+        "schemas": {
+            "Payload": {
+                "type": "object",
+                "properties": {
+                    "metadata": {
+                        "type": "object",
+                        "default": {"$ref": "customer-provided-default-value"},
+                    }
+                },
+            }
+        }
+    }
+    response = spec["paths"]["/health"]["get"]["responses"]["200"]
+    response["content"] = {
+        "application/json": {
+            "schema": {"$ref": "#/components/schemas/Payload"},
+            "example": {"$ref": "customer-provided-example-value"},
+        }
+    }
+    spec_path = tmp_path / "openapi.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    assert load_openapi_spec(spec_path) == spec
+
+
 def test_rejects_unsupported_file_extension(tmp_path: Path) -> None:
     with pytest.raises(SpecLoadError, match="Use .json, .yaml, or .yml"):
         load_openapi_spec(tmp_path / "openapi.txt")
@@ -100,3 +129,44 @@ def test_rejects_unsupported_file_extension(tmp_path: Path) -> None:
 def test_reports_missing_spec_file(tmp_path: Path) -> None:
     with pytest.raises(SpecLoadError, match="Cannot read OpenAPI spec"):
         load_openapi_spec(tmp_path / "missing.yaml")
+
+
+def test_preserves_default_response_and_server_variable(tmp_path: Path) -> None:
+    spec = _valid_spec("3.1.0")
+    spec["paths"]["/health"]["get"]["responses"] = {"default": {"description": "fallback"}}
+    spec["servers"] = [{"url": "https://{host}", "variables": {"host": {"default": "api.test"}}}]
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    assert load_openapi_spec(path) == spec
+
+
+def test_validates_schema_property_named_default(tmp_path: Path) -> None:
+    spec = _valid_spec("3.1.0")
+    spec["components"] = {"schemas": {"Payload": {
+        "type": "object", "properties": {"default": {"type": "invalid-type"}}
+    }}}
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(SpecLoadError, match="Invalid OpenAPI spec"):
+        load_openapi_spec(path)
+
+
+def test_rejects_cyclic_yaml_alias_with_load_error(tmp_path: Path) -> None:
+    path = tmp_path / "spec.yaml"
+    path.write_text(
+        "openapi: 3.1.0\ninfo: {title: t, version: '1'}\npaths: {}\n"
+        "components:\n  schemas:\n    Node: &node\n      type: object\n"
+        "      properties:\n        child: *node\n", encoding="utf-8",
+    )
+    with pytest.raises(SpecLoadError, match="Cyclic YAML aliases"):
+        load_openapi_spec(path)
+
+
+def test_accepts_shared_acyclic_yaml_alias(tmp_path: Path) -> None:
+    path = tmp_path / "spec.yaml"
+    path.write_text(
+        "openapi: 3.1.0\ninfo: {title: t, version: '1'}\npaths: {}\n"
+        "components:\n  schemas:\n    First: &schema {type: string}\n    Second: *schema\n",
+        encoding="utf-8",
+    )
+    assert load_openapi_spec(path)["components"]["schemas"]["Second"] == {"type": "string"}
