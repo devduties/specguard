@@ -170,3 +170,38 @@ def test_accepts_shared_acyclic_yaml_alias(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert load_openapi_spec(path)["components"]["schemas"]["Second"] == {"type": "string"}
+
+
+@pytest.mark.parametrize("location", ["component", "inline", "nested"])
+def test_rejects_invalid_openapi_3_0_default(tmp_path: Path, location: str) -> None:
+    spec = _valid_spec("3.0.3")
+    schema = {"type": "integer", "default": "not-an-integer"}
+    if location == "component":
+        spec["components"] = {"schemas": {"Count": schema}}
+    else:
+        if location == "nested":
+            schema = {"type": "object", "properties": {"count": schema}}
+        spec["paths"]["/health"]["get"]["responses"]["200"]["content"] = {
+            "application/json": {"schema": schema}
+        }
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(SpecLoadError, match="Invalid OpenAPI spec"):
+        load_openapi_spec(path)
+
+
+def test_preserves_valid_openapi_3_0_default(tmp_path: Path) -> None:
+    spec = _valid_spec("3.0.3")
+    spec["components"] = {"schemas": {"Count": {"type": "integer", "default": 42}}}
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    assert load_openapi_spec(path) == spec
+
+
+@pytest.mark.parametrize("version", ["3.1.0", "3.2.0"])
+def test_json_schema_default_is_an_annotation(tmp_path: Path, version: str) -> None:
+    spec = _valid_spec(version)
+    spec["components"] = {"schemas": {"Count": {"type": "integer", "default": "annotation"}}}
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    assert load_openapi_spec(path) == spec

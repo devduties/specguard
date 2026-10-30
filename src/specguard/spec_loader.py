@@ -83,9 +83,13 @@ def load_openapi_spec(path: str | Path) -> dict[str, Any]:
 
 
 def _validation_copy(document: dict[str, Any]) -> dict[str, Any]:
-    """Avoid resolving ``$ref`` values nested inside JSON Schema defaults."""
+    """Keep 3.0 defaults checked; treat 3.1+ schema defaults as annotations."""
     validation_document = deepcopy(document)
-    _remove_default_annotations(validation_document)
+    # OpenAPI 3.0 requires defaults to conform to their schema. Later versions
+    # use JSON Schema annotation semantics; hide those annotations from the
+    # validator's reference resolver so literal $ref payloads stay data.
+    if not document["openapi"].startswith("3.0."):
+        _remove_default_annotations(validation_document)
     return validation_document
 
 
