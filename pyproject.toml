@@ -10,7 +10,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Taiwo Oyebode" }]
-dependencies = []
+dependencies = [
+  "openapi-spec-validator>=0.9,<1",
+  "PyYAML>=6,<7",
+]
 
 [project.optional-dependencies]
 dev = [
