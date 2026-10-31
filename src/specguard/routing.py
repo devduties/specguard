@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
 from urllib.parse import unquote_to_bytes, urlsplit
@@ -17,6 +17,7 @@ class OperationMatch:
     method: str
     operation: dict[str, Any]
     path_parameters: dict[str, str]
+    raw_path_parameters: dict[str, str] = field(default_factory=dict, compare=False, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +143,17 @@ def resolve_operation(
             _allowed_methods(selected.path_item),
         )
 
-    return OperationMatch(selected.path_template, method_key, operation, selected.path_parameters)
+    raw_parameters: dict[str, str] = {}
+    for tokens, raw_segment in zip(
+        _compile_path_template(selected.path_template), _segments(request_path), strict=True
+    ):
+        decoded = _strict_unquote(raw_segment, InvalidRequestTargetError, "request path")
+        captured = _match_segment(tokens, decoded, raw_text=raw_segment)
+        if captured is not None:
+            raw_parameters.update(captured)
+    return OperationMatch(
+        selected.path_template, method_key, operation, selected.path_parameters, raw_parameters
+    )
 
 
 def _request_path(request_target: str) -> str:
@@ -245,7 +256,9 @@ def _match_path(
     return parameters
 
 
-def _match_segment(tokens: tuple[PathToken, ...], text: str) -> dict[str, str] | None:
+def _match_segment(
+    tokens: tuple[PathToken, ...], text: str, *, raw_text: str | None = None
+) -> dict[str, str] | None:
     """Match the entire segment without regex backtracking.
 
     Suffix reachability takes O(tokens * characters) states. Reconstruction
@@ -268,6 +281,20 @@ def _match_segment(tokens: tuple[PathToken, ...], text: str) -> dict[str, str] |
     if not suffixes[0][0]:
         return None
 
+    # Retain encoded delimiters for the later parameter-deserialization step.
+    raw_offsets = [0]
+    if raw_text is not None:
+        byte_ends: list[int] = []
+        cursor = 0
+        while cursor < len(raw_text):
+            end = cursor + (3 if raw_text[cursor] == "%" else 1)
+            width = 1 if raw_text[cursor] == "%" else len(raw_text[cursor].encode("utf-8"))
+            byte_ends.extend([end] * width)
+            cursor = end
+        byte_cursor = 0
+        for character in text:
+            byte_cursor += len(character.encode("utf-8"))
+            raw_offsets.append(byte_ends[byte_cursor - 1])
     parameters: dict[str, str] = {}
     offset = 0
     for index, token in enumerate(tokens):
@@ -275,7 +302,11 @@ def _match_segment(tokens: tuple[PathToken, ...], text: str) -> dict[str, str] |
             end = offset + 1
             while not suffixes[index + 1][end]:
                 end += 1
-            parameters[token.value] = text[offset:end]
+            parameters[token.value] = (
+                text[offset:end]
+                if raw_text is None
+                else raw_text[raw_offsets[offset] : raw_offsets[end]]
+            )
             offset = end
         else:
             offset += len(token.value)

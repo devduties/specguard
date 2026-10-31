@@ -19,6 +19,67 @@ print(match.path_template, match.path_parameters)
 
 `resolve_operation` raises `RouteNotFoundError` for an unmatched path and `MethodNotAllowedError` when the path exists but does not define the requested method. Both include an HTTP status code for the future proxy layer to use. The current project does not yet run an HTTP server or forward requests; those are later roadmap steps.
 
+## Request parameter validation
+
+`validate_parameters` routes a request, combines Path Item and operation parameters
+(operation definitions override the same name and location), and returns typed
+path, query, header, and cookie values. Header lookup is case-insensitive. Missing optional
+parameters are omitted; defaults are not injected and inputs are not modified.
+
+```python
+from specguard.parameters import validate_parameters
+
+parameters = validate_parameters(
+    spec, "/orders/42?limit=10", "GET", headers={"X-Client": "demo"}
+)
+print(parameters.path, parameters.query, parameters.headers, parameters.cookies)
+```
+
+Parameters support primitive types, arrays, objects, nullable values, type lists,
+and `allOf`/`anyOf`/`oneOf`. Required values, schema constraints, and known formats
+are checked using the contract's OpenAPI version. Local JSON Pointer parameter
+and schema references are supported. Strings are preserved when a union permits
+them; otherwise possible conversions are checked against the complete schema.
+For example, `oneOf` still rejects a converted value matching multiple branches.
+
+Supported styles:
+
+- Path: `simple`, `label`, and `matrix`, with either explode setting.
+- Query: `form`, `spaceDelimited`, `pipeDelimited`, and `deepObject`.
+- Header: `simple`.
+- Cookie: `form`, using semicolon-separated cookie pairs. Exploded arrays use
+  repeated cookie names; exploded objects use property names as cookie names.
+
+Encoded commas, dots, and semicolons remain data when splitting structural
+delimiters. Space/pipe query delimiters accept their percent-encoded forms; data
+that collides with those delimiters must be pre-encoded as described by OpenAPI.
+Cookie values use percent-decoding without replacing plus signs with spaces;
+header values are not percent-decoded. Repeated scalar parameters and repeated
+object properties are rejected. Undeclared parameters are ignored, except fields
+belonging to free-form exploded objects. Other declared parameters' names and
+object properties are excluded from free-form object collection.
+Repeated array or object header lines are combined in their original order;
+scalar header parameters still reject duplicate lines. Referenced and composed
+closed objects ignore unrelated query fields in the same way as inline objects.
+
+Content-encoded parameters support JSON (including `+json` media types) and
+`text/plain`. JSON supports nested arrays and objects without coercing JSON
+strings into numbers. Other media types can supply a callable through the
+`content_decoders` mapping; decoded values still undergo schema validation.
+JSON numeric overflow is rejected, including inside nested objects and arrays.
+
+`ParameterValidationError` carries a tuple of location/name/message issues and a
+400 status code. Routing errors retain their existing behavior. Invalid or
+undefined style combinations raise `ParameterDefinitionError`, including
+`deepObject` without `explode=true` and exploded space/pipe styles. OpenAPI does
+not define nested `deepObject` property serialization; use JSON content for nested
+objects or arrays. Conversion is bounded to 32 nesting levels and 128 typed
+interpretations per parameter. OpenAPI's reserved Accept, Content-Type, and
+Authorization header parameter definitions are ignored.
+
+Request-body validation, a consistent HTTP error envelope, and proxy forwarding
+remain later roadmap steps.
+
 ## Development
 
 ```powershell
