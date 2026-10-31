@@ -124,9 +124,76 @@ body-validation error with status code 415. Unresolved contract references raise
 `BodyDefinitionError`; routing errors retain their existing behavior. The
 contract should be loaded and validated before validating requests.
 
-A consistent HTTP error envelope, proxy forwarding, and configurable request-size
-limits remain later roadmap steps. The parsed value is for validation and
+Proxy forwarding and configurable request-size limits remain later roadmap
+steps. The parsed value is for validation and
 inspection; forward the original body bytes when the proxy layer is added.
+
+## Consistent validation errors
+
+`error_response` converts parameter and body validation exceptions into a common,
+JSON-serializable error envelope. The response's `status_code` is separate from
+its JSON payload so an HTTP adapter can set the response status directly.
+
+```python
+from specguard.errors import error_response
+from specguard.parameters import ParameterValidationError, validate_parameters
+from specguard.request_body import BodyValidationError, validate_request_body
+
+try:
+    validate_parameters(spec, target, method, headers)
+    validate_request_body(spec, target, method, raw_body, content_type=content_type)
+except (ParameterValidationError, BodyValidationError) as exc:
+    response = error_response(exc)
+    status = response.status_code
+    payload = response.to_dict()
+```
+
+A missing required query parameter produces status 400 and this payload:
+
+```json
+{
+  "error": {
+    "code": "parameter_validation_failed",
+    "message": "Request parameters do not satisfy the contract.",
+    "details": [
+      {
+        "location": "query",
+        "name": "limit",
+        "path": [],
+        "code": "required",
+        "message": "Required value is missing."
+      }
+    ]
+  }
+}
+```
+
+Every envelope has `error.code`, `error.message`, and an `error.details` array.
+Every detail has `location`, `name`, `path`, `code`, and `message`. Parameter
+details identify the location and parameter name, with an empty path. Body
+details use location `body`, name `null`, and a path of field names and array
+indexes relative to the JSON root. Missing-property errors identify their
+containing object, as reported by the schema validator.
+
+| Exception | HTTP status | Error code |
+| --- | --- | --- |
+| `ParameterValidationError` | 400 | `parameter_validation_failed` |
+| `BodyValidationError` | 400 | `body_validation_failed` |
+| `UnsupportedMediaTypeError` | 415 | `unsupported_media_type` |
+| Contract or unexpected exceptions | 500 | `internal_error` |
+
+Client-facing messages come from a fixed set, including codes for missing values,
+types, enums, formats, common constraints, JSON syntax, and text encoding. Other
+detail codes fall back to `invalid_value`. Raw schema messages, submitted values,
+decoder exceptions, and stack traces are not included in response messages.
+Existing exception `issues` and diagnostic strings remain available to callers;
+serialize the envelope instead of sending `str(exc)` to clients.
+
+Contract and unexpected exceptions passed to `error_response` produce a generic
+500 envelope with an empty details array. Handle and log the original exception
+on the server as appropriate. Routing errors retain their current API and are
+outside this increment's adapter; map them separately when adding the HTTP layer.
+This feature does not start a server or forward requests.
 
 ## Development
 

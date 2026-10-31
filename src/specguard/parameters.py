@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from specguard.errors import ErrorDetail, RequestValidationError
 from specguard.json_values import parse_json
 from specguard.parameter_encoding import (
     decode_parameter_value,
@@ -37,16 +38,22 @@ class ParameterIssue:
     location: str
     name: str
     message: str
+    code: str = "invalid_value"
 
 
-class ParameterValidationError(ValueError):
+class ParameterValidationError(RequestValidationError):
     """Request parameters do not satisfy the contract."""
 
     status_code = 400
+    code = "parameter_validation_failed"
+    public_message = "Request parameters do not satisfy the contract."
 
     def __init__(self, issues: Sequence[ParameterIssue]) -> None:
         self.issues = tuple(issues)
-        super().__init__("; ".join(f"{i.location}.{i.name}: {i.message}" for i in issues))
+        details = tuple(ErrorDetail(i.location, i.name or None, (), i.code) for i in self.issues)
+        super().__init__(
+            "; ".join(f"{i.location}.{i.name}: {i.message}" for i in self.issues), details
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +118,7 @@ def validate_parameters(
         reserved = _reserved_names(document, definitions, parameter)
         present = False
         failures: list[str] = []
+        failure_codes: set[str] = set()
         found = False
         # Union types may have distinct wire shapes. Try string first when allowed,
         # then schema declaration order, and validate each against the FULL schema.
@@ -138,6 +146,7 @@ def validate_parameters(
                     errors = list(validator.evolve(schema=schema).iter_errors(value))
                     if errors:
                         failures.extend(error.message for error in errors)
+                        failure_codes.update(error.validator for error in errors)
                         continue
                     values[location][name] = value
                     found = True
@@ -153,9 +162,12 @@ def validate_parameters(
             continue
         if present:
             message = "; ".join(dict.fromkeys(failures)) or "Invalid parameter value."
-            issues.append(ParameterIssue(location, name, message))
+            code = next(iter(failure_codes)) if len(failure_codes) == 1 else "invalid_value"
+            issues.append(ParameterIssue(location, name, message, code))
         elif parameter.get("required") or location == "path":
-            issues.append(ParameterIssue(location, name, "Required parameter is missing."))
+            issues.append(
+                ParameterIssue(location, name, "Required parameter is missing.", "required")
+            )
     if issues:
         raise ParameterValidationError(issues)
     return ValidatedParameters(
@@ -195,7 +207,9 @@ def _collect_sources(
     try:
         sources["query"] = parse_parameter_pairs(request_target.partition("?")[2])
     except ValueError as exc:
-        raise ParameterValidationError([ParameterIssue("query", "", str(exc))]) from exc
+        raise ParameterValidationError(
+            [ParameterIssue("query", "", str(exc), "invalid_encoding")]
+        ) from exc
     header_pairs = headers.items() if isinstance(headers, Mapping) else headers
     for name, value in header_pairs:
         sources["header"].setdefault(name.lower(), []).append(value)
@@ -204,7 +218,9 @@ def _collect_sources(
             for name, raw_values in parse_parameter_pairs(cookie_header, cookie=True).items():
                 sources["cookie"].setdefault(name, []).extend(raw_values)
     except ValueError as exc:
-        raise ParameterValidationError([ParameterIssue("cookie", "", str(exc))]) from exc
+        raise ParameterValidationError(
+            [ParameterIssue("cookie", "", str(exc), "invalid_encoding")]
+        ) from exc
 
     return sources
 
