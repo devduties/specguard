@@ -72,8 +72,17 @@ class RequestValidationError(ValueError):
         super().__init__(message)
 
 
+class UpstreamError(Exception):
+    """An upstream failure with a safe public response and private diagnostics."""
+
+    status_code = 502
+    code = "upstream_error"
+    public_message = "The upstream service could not complete the request."
+    details: tuple[ErrorDetail, ...] = ()
+
+
 def error_response(error: Exception) -> ErrorResponse:
     """Expose known request errors; keep contract and unexpected failures private."""
-    if isinstance(error, RequestValidationError):
+    if isinstance(error, (RequestValidationError, UpstreamError)):
         return ErrorResponse(error.status_code, error.code, error.public_message, error.details)
     return ErrorResponse(500, "internal_error", "An internal error occurred.")

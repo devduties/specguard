@@ -17,7 +17,7 @@ match = resolve_operation(spec, "/orders/order-42?include=items", "GET")
 print(match.path_template, match.path_parameters)
 ```
 
-`resolve_operation` raises `RouteNotFoundError` for an unmatched path and `MethodNotAllowedError` when the path exists but does not define the requested method. Both include an HTTP status code for the future proxy layer to use. The current project does not yet run an HTTP server or forward requests; those are later roadmap steps.
+`resolve_operation` raises `RouteNotFoundError` for an unmatched path and `MethodNotAllowedError` when the path exists but does not define the requested method. Both include an HTTP status code. The library now forwards validated requests through `UpstreamProxy`; a listening HTTP server and CLI are later roadmap steps.
 
 ## Request parameter validation
 
@@ -124,9 +124,8 @@ body-validation error with status code 415. Unresolved contract references raise
 `BodyDefinitionError`; routing errors retain their existing behavior. The
 contract should be loaded and validated before validating requests.
 
-Proxy forwarding and configurable request-size limits remain later roadmap
-steps. The parsed value is for validation and
-inspection; forward the original body bytes when the proxy layer is added.
+The parsed value is for validation and inspection. The forwarding layer sends
+the original body bytes without reserializing the parsed JSON.
 
 ## Consistent validation errors
 
@@ -193,7 +192,88 @@ Contract and unexpected exceptions passed to `error_response` produce a generic
 500 envelope with an empty details array. Handle and log the original exception
 on the server as appropriate. Routing errors retain their current API and are
 outside this increment's adapter; map them separately when adding the HTTP layer.
-This feature does not start a server or forward requests.
+This error adapter does not start a server.
+
+## Forwarding validated requests
+
+`UpstreamProxy` owns a reusable async HTTP client. Each `forward` call validates
+the operation, parameters, and JSON body before sending anything upstream.
+Load and validate the contract with `load_openapi_spec` before constructing the
+proxy. The upstream base URL is configured by the operator, not by the caller.
+
+```python
+import asyncio
+
+from specguard.forwarding import ProxySettings, UpstreamProxy
+from specguard.spec_loader import load_openapi_spec
+
+async def main():
+    spec = load_openapi_spec("openapi.yaml")
+    settings = ProxySettings(
+        upstream_url="http://127.0.0.1:9000/api",
+        timeout_seconds=10,
+        max_request_bytes=1024 * 1024,
+        max_response_bytes=8 * 1024 * 1024,
+    )
+    async with UpstreamProxy(spec, settings) as proxy:
+        response = await proxy.forward(
+            "/orders?notify=true",
+            "POST",
+            headers={"Content-Type": "application/json"},
+            body=b'{ "name" : "coffee", "quantity" : 2 }',
+        )
+        print(response.status_code, response.body)
+
+asyncio.run(main())
+```
+
+Pass origin-form request targets beginning with `/`. A configured base path is
+prepended, so `/orders` above reaches `/api/orders`. Leading double slashes,
+percent-encoded values, duplicate query parameters, and original body bytes are
+preserved. Unicode targets are percent-encoded before validation and forwarding.
+Absolute request URLs, fragments, backslashes, control characters, and dot path
+segments are rejected rather than reinterpreted. The method's capitalization is
+preserved, including custom methods. Request bodies must be bytes.
+
+Request and response hop-by-hop headers are removed, including fields nominated
+by any `Connection` header. The outbound Host is set for the configured upstream,
+and Content-Length is recalculated from the buffered body. Validation sees those
+outbound headers, so a Connection-nominated field cannot pass validation and then
+disappear upstream. Ordinary headers such as Authorization and Cookie are passed
+through. Duplicate Content-Type fields and non-identity request Content-Encoding
+are rejected. Response headers are retained as a tuple of byte pairs, preserving
+duplicates such as Set-Cookie. Compressed response bytes and their Content-Encoding
+remain together; the proxy does not decompress or reserialize the response.
+
+Redirects and automatic retries are disabled. The client does not retain or
+replay upstream cookies between callers, use environment proxy settings, or
+disable TLS verification. Optional parameter media-type decoders can be supplied
+through `UpstreamProxy(..., content_decoders=...)`, just as with `validate_parameters`.
+
+Defaults are a 10-second timeout, a 1 MiB request-body cap, and an 8 MiB response-body
+cap. The timeout bounds the upstream exchange, including reading the response;
+HTTPX also applies connect, read, write, and pool timeouts. Oversized requests are
+blocked before validation or transmission. Responses are read as raw chunks up to
+the configured cap and the stream is closed on completion or failure. Upstream
+4xx/5xx statuses and redirect responses are returned unchanged, rather than
+treated as transport failures.
+
+| Exception | Status | Envelope code |
+| --- | --- | --- |
+| `ProxyRequestError` | 400 | `invalid_proxy_request` |
+| `RequestTooLargeError` | 413 | `request_too_large` |
+| `UnsupportedContentEncodingError` | 415 | `unsupported_content_encoding` |
+| `UpstreamError` | 502 | `upstream_error` |
+| `UpstreamResponseTooLargeError` | 502 | `upstream_response_too_large` |
+| `UpstreamTimeoutError` | 504 | `upstream_timeout` |
+
+These exceptions work with `error_response`; upstream failure envelopes omit
+private connection details. Existing parameter/body validation errors and routing
+exceptions still propagate without an upstream call. A future HTTP adapter should
+set the response status, pass through the returned header pairs, and write the
+returned body bytes. This milestone buffers bodies; it does not provide streaming
+uploads, WebSockets, response-schema validation, or a listening server. Enforce
+the request-size cap while receiving data when the server adapter is added.
 
 ## Development
 
