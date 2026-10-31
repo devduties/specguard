@@ -77,8 +77,56 @@ objects or arrays. Conversion is bounded to 32 nesting levels and 128 typed
 interpretations per parameter. OpenAPI's reserved Accept, Content-Type, and
 Authorization header parameter definitions are ignored.
 
-Request-body validation, a consistent HTTP error envelope, and proxy forwarding
-remain later roadmap steps.
+## JSON request body validation
+
+`validate_request_body` routes a request, checks the operation's request body,
+and returns the parsed JSON value. The caller supplies raw UTF-8 bytes (or text)
+and the Content-Type separately.
+
+```python
+from specguard.request_body import validate_request_body
+
+body = validate_request_body(
+    spec,
+    "/orders",
+    "POST",
+    b'{"name":"coffee","quantity":2}',
+    content_type="application/json",
+)
+print(body.present, body.value)
+```
+
+Required bodies reject missing or zero-length input. Optional bodies can be
+absent; whitespace is a present, invalid JSON body. JSON `null` is also present
+and must satisfy the schema. Bodies supplied to operations without a request-body
+declaration are rejected. Validation does not coerce values, insert defaults,
+change the contract, or modify the original body.
+
+Supported media types are JSON and declared `+json` types. Content-Type matching
+is case-insensitive and ignores parameters such as `charset=utf-8`; bytes must
+always be UTF-8. An exact content entry wins over `type/*`, which wins over `*/*`.
+An `application/json` declaration does not implicitly permit every `+json` type.
+Non-JSON bodies, form data, multipart uploads, and streaming JSON are not
+supported in this milestone.
+
+Schema validation uses the contract's OpenAPI 3.0, 3.1, or 3.2 rules and known
+format checks. It covers nested objects and arrays, required properties, types,
+enums, bounds, string constraints, and composed schemas. Internal request-body,
+schema, and OpenAPI 3.2 media-type references are supported; external references
+remain unsupported. OpenAPI 3.0 bodies use request-specific readOnly/writeOnly
+rules. In 3.1 and 3.2 those keywords retain the library's annotation semantics.
+
+`BodyValidationError` has status code 400 and an `issues` tuple of `BodyIssue`
+records. Each issue contains a `path` tuple of field names and array indexes,
+plus a message. Malformed JSON, invalid UTF-8, and nonfinite numbers (including
+overflow inside nested values) are rejected. `UnsupportedMediaTypeError` is a
+body-validation error with status code 415. Unresolved contract references raise
+`BodyDefinitionError`; routing errors retain their existing behavior. The
+contract should be loaded and validated before validating requests.
+
+A consistent HTTP error envelope, proxy forwarding, and configurable request-size
+limits remain later roadmap steps. The parsed value is for validation and
+inspection; forward the original body bytes when the proxy layer is added.
 
 ## Development
 
