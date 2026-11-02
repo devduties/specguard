@@ -1,8 +1,8 @@
 # SpecGuard
 
-SpecGuard is an OpenAPI request-validation proxy. It checks incoming requests against an API contract and forwards valid requests to the configured upstream service.
+SpecGuard is an OpenAPI request-validation proxy that checks incoming requests against an API contract and forwards valid requests to the configured upstream service.
 
-The core is being built in small, reviewable steps. SpecGuard can load and validate a local OpenAPI contract, then match a request target and method to an operation. It extracts path parameters, ignores the query string during route matching, decodes percent-encoded path segments, and gives literal routes precedence over parameterized routes.
+Run the [local orders demo](examples/demo/README.md) to see valid requests forwarded and invalid requests blocked.
 
 ## Supported contract files
 
@@ -23,7 +23,7 @@ print(match.path_template, match.path_parameters)
 
 Provide a local OpenAPI contract and a running upstream service. The example
 below assumes your contract is `openapi.yaml` and the upstream listens on port
-9000. A bundled sample contract and demo service are the next roadmap milestone.
+9000. For a complete runnable example, follow the [local orders demo](examples/demo/README.md).
 
 ```powershell
 py -m venv .venv

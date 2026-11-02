@@ -1,0 +1,101 @@
+openapi: 3.1.0
+info:
+  title: SpecGuard orders demo
+  version: 1.0.0
+paths:
+  /orders:
+    get:
+      summary: List orders received by the demo upstream
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+      responses:
+        '200':
+          description: Stored orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Order'
+    post:
+      summary: Create an order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrder'
+      responses:
+        '201':
+          description: Order created by the upstream
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+  /orders/{order_id}:
+    get:
+      summary: Retrieve an order
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: Stored order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          description: No order has this ID
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: string
+components:
+  schemas:
+    CreateOrder:
+      type: object
+      required: [name, quantity]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 50
+        status:
+          type: string
+          enum: [draft, confirmed]
+          default: draft
+    Order:
+      type: object
+      required: [id, name, quantity, status]
+      additionalProperties: false
+      properties:
+        id:
+          type: integer
+          minimum: 1
+        name:
+          type: string
+        quantity:
+          type: integer
+        status:
+          type: string
+          enum: [draft, confirmed]
