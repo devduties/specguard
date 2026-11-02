@@ -112,10 +112,21 @@ def test_cli_launches_a_working_validation_proxy(tmp_path):
             if process.poll() is None:
                 process.terminate()
             try:
-                process.communicate(timeout=5)
+                output = process.communicate(timeout=5)[0]
             except subprocess.TimeoutExpired:
                 process.kill()
-                process.communicate(timeout=5)
+                output = process.communicate(timeout=5)[0]
         upstream.shutdown()
         upstream.server_close()
         thread.join(timeout=5)
+
+    events = [json.loads(line) for line in output.splitlines() if line.startswith("{")]
+    assert len(events) == 4
+    assert {event["status_code"] for event in events} == {200, 400, 404, 413}
+    assert events[0]["request_id"] == accepted.headers["x-request-id"]
+    assert events[1]["request_id"] == rejected.headers["x-request-id"]
+    assert events[0]["route"] == "/items/{id}"
+    assert events[0]["method"] == "get"
+    assert events[0]["event"] == "request_finished"
+    assert events[0]["level"] == "info"
+    assert all("tag=" not in json.dumps(event) for event in events)

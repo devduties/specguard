@@ -143,6 +143,8 @@ class UpstreamProxy:
         request_method: str,
         headers: Mapping[str, str] | Sequence[tuple[str, str]] | Sequence[tuple[bytes, bytes]] = (),
         body: bytes = b"",
+        *,
+        request_id: str | None = None,
     ) -> UpstreamResponse:
         if self._client is None:
             raise RuntimeError("Use UpstreamProxy as an async context manager.")
@@ -166,6 +168,9 @@ class UpstreamProxy:
                 headers=_forward_headers(raw_headers, request=True),
                 content=body,
             )
+            if request_id is not None:
+                # Add proxy metadata after hop-by-hop filtering, before validation.
+                request.headers["X-Request-ID"] = request_id
         except (ValueError, UnicodeError) as exc:
             raise ProxyRequestError("Invalid request headers.") from exc
         # HTTPX uppercases methods on construction, but custom methods are case-sensitive.

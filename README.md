@@ -64,11 +64,41 @@ python -m specguard
 
 These are process environment variables; `.env` files are not loaded automatically.
 The server runs as one process, binds to loopback by default, and accepts HTTP
-requests for contract routes. Access logs are disabled so raw query strings are
-not written to logs. HTTP-to-WebSocket upgrades are not enabled, and the server
+requests for contract routes. Uvicorn access logs are disabled; SpecGuard emits
+the structured request records described below. HTTP-to-WebSocket upgrades are not enabled, and the server
 does not add a dashboard, documentation routes, or health endpoints.
 
 The proxy adapter uses Starlette directly because routing and validation come from the supplied OpenAPI contract, so FastAPI's endpoint declarations and schema generation would duplicate that work.
+
+## Request logs and IDs
+
+The CLI writes one JSON record per HTTP request to stderr. Each request gets a
+new UUID4 hex ID, returned as `X-Request-ID` and sent to upstream under the same
+header. Client-supplied IDs, including duplicates, are replaced; upstream response
+IDs are also replaced so the response always agrees with the request log.
+The generated header is included in upstream request-header validation.
+
+```json
+{"timestamp":"2026-11-03T18:00:00+00:00","level":"info","event":"request_finished","request_id":"23d9989203144b39911044b16363b66b","method":"post","route":"/orders","status_code":201,"duration_ms":25.0,"outcome":"upstream_response","error_code":null}
+```
+
+`method` is the matched contract method and `route` is its path template, such
+as `/orders/{order_id}`. Both are null when no operation was matched. Logs omit
+raw paths, queries, headers, bodies, and exception messages. `duration_ms` measures
+the call to `proxy.forward()`, including validation and the upstream exchange;
+it excludes reading the incoming body and sending the response. It is null if
+the request stops before that call, such as an oversized upload or disconnect.
+
+Successful responses use INFO, 4xx responses and client disconnects use WARNING,
+and 5xx responses, cancellation, and response-send failures use ERROR. `outcome`
+distinguishes `upstream_response` (including upstream 4xx/5xx) from `proxy_error`;
+proxy errors also include the stable envelope `error_code`. Interrupted requests
+use `client_disconnected`, `cancelled`, or `response_failed`; `status_code` is
+null until a response is prepared and does not guarantee delivery to the client.
+
+Uvicorn lifecycle messages retain their standard format. Applications embedding
+`create_app()` control their own logging configuration; request records use the
+`specguard.requests` logger and `specguard.request_logging.RequestFormatter`.
 
 ## Request parameter validation
 

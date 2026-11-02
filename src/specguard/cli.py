@@ -6,6 +6,7 @@ from collections.abc import Sequence
 import uvicorn
 
 from specguard.config import parse_settings
+from specguard.request_logging import logging_config
 from specguard.server import create_app
 from specguard.spec_loader import SpecLoadError
 
@@ -25,6 +26,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             lifespan="on",
             workers=1,
             access_log=False,
+            log_config=logging_config(),
             proxy_headers=False,
             server_header=False,
             date_header=False,

@@ -1,8 +1,11 @@
 """HTTP adapter for the existing validation and upstream forwarding flow."""
 
+import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from urllib.parse import quote
+from uuid import uuid4
 
 import httpx
 from starlette.applications import Starlette
@@ -19,10 +22,15 @@ from specguard.forwarding import (
     UpstreamProxy,
     UpstreamResponse,
 )
-from specguard.routing import InvalidRequestTargetError, MethodNotAllowedError, RouteNotFoundError
+from specguard.routing import (
+    InvalidRequestTargetError,
+    MethodNotAllowedError,
+    RouteNotFoundError,
+    resolve_operation,
+)
 from specguard.spec_loader import load_openapi_spec
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("specguard.requests")
 
 
 def create_app(
@@ -48,40 +56,93 @@ async def _forward_request(scope: Scope, receive: Receive, send: Send) -> None:
         await send({"type": "websocket.close", "code": 1008})
         return
     request = Request(scope, receive)
+    request_id = uuid4().hex
+    status_code = None
+    error_code = None
+    outcome = "response_failed"
     try:
-        body = bytearray()
-        maximum = request.app.state.settings.proxy.max_request_bytes
-        lengths = request.headers.getlist("content-length")
-        if lengths:
-            if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit():
-                raise ProxyRequestError("Invalid Content-Length.")
-            claimed = lengths[0].lstrip("0") or "0"
-            if len(claimed) > len(str(maximum)) or int(claimed) > maximum:
-                raise RequestTooLargeError("Request body exceeds the configured size limit.")
-        async for chunk in request.stream():
-            if len(body) + len(chunk) > maximum:
-                raise RequestTooLargeError("Request body exceeds the configured size limit.")
-            body.extend(chunk)
-        result = await request.app.state.proxy.forward(
-            _request_target(scope), request.method, scope["headers"], bytes(body)
+        try:
+            response = await _validated_response(request, request_id)
+            response_outcome = "upstream_response"
+        except ClientDisconnect:
+            outcome = "client_disconnected"
+            return
+        except (
+            RequestValidationError,
+            UpstreamError,
+            RouteNotFoundError,
+            MethodNotAllowedError,
+            InvalidRequestTargetError,
+        ) as exc:
+            result = error_response(exc)
+            error_code = result.code
+            response = _error_response(exc)
+            response_outcome = "proxy_error"
+        except Exception as exc:
+            error_code = "internal_error"
+            response = _error_response(exc)
+            response_outcome = "proxy_error"
+        # Replace any upstream ID, including duplicates, so the log and client agree.
+        response.headers["X-Request-ID"] = request_id
+        status_code = response.status_code
+        if request.method == "HEAD":
+            response.body = b""
+        await response(scope, receive, send)
+        outcome = response_outcome
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+    finally:
+        match = getattr(request.state, "operation", None)
+        level = logging.INFO
+        if outcome in {"response_failed", "cancelled"} or (status_code or 0) >= 500:
+            level = logging.ERROR
+        elif outcome == "client_disconnected" or (status_code or 0) >= 400:
+            level = logging.WARNING
+        logger.log(
+            level,
+            "request_finished",
+            extra={
+                "request_id": request_id,
+                "method": match.method if match is not None else None,
+                "route": match.path_template if match is not None else None,
+                "status_code": status_code,
+                "duration_ms": getattr(request.state, "duration_ms", None),
+                "outcome": outcome,
+                "error_code": error_code,
+            },
         )
-        response = _upstream_response(result)
-    except ClientDisconnect:
-        return
-    except (
-        RequestValidationError,
-        UpstreamError,
-        RouteNotFoundError,
-        MethodNotAllowedError,
-        InvalidRequestTargetError,
-    ) as exc:
-        response = _error_response(exc)
-    except Exception as exc:
-        logger.error("Request handling failed (%s).", type(exc).__name__)
-        response = _error_response(exc)
-    if request.method == "HEAD":
-        response.body = b""
-    await response(scope, receive, send)
+
+
+async def _validated_response(request: Request, request_id: str) -> Response:
+    body = bytearray()
+    maximum = request.app.state.settings.proxy.max_request_bytes
+    lengths = request.headers.getlist("content-length")
+    if lengths:
+        if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit():
+            raise ProxyRequestError("Invalid Content-Length.")
+        claimed = lengths[0].lstrip("0") or "0"
+        if len(claimed) > len(str(maximum)) or int(claimed) > maximum:
+            raise RequestTooLargeError("Request body exceeds the configured size limit.")
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > maximum:
+            raise RequestTooLargeError("Request body exceeds the configured size limit.")
+        body.extend(chunk)
+    target = _request_target(request.scope)
+    proxy = request.app.state.proxy
+    try:
+        request.state.operation = resolve_operation(proxy.document, target, request.method)
+    except (LookupError, ValueError):
+        # Metadata must not change the forwarding pipeline's error precedence.
+        pass
+    started = time.perf_counter()
+    try:
+        result = await proxy.forward(
+            target, request.method, request.scope["headers"], bytes(body), request_id=request_id
+        )
+    finally:
+        request.state.duration_ms = round((time.perf_counter() - started) * 1000, 3)
+    return _upstream_response(result)
 
 
 def _request_target(scope: Scope) -> str:
