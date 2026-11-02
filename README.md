@@ -1,12 +1,76 @@
 # SpecGuard
 
-SpecGuard is an OpenAPI request-validation proxy that checks incoming requests against an API contract and forwards valid requests to the configured upstream service.
+SpecGuard sits in front of your API and checks every request against an OpenAPI contract before it reaches your service. Valid requests go through; invalid ones get a clear error response and never touch the upstream.
 
-Run the [local orders demo](examples/demo/README.md) to see valid requests forwarded and invalid requests blocked.
+Run the [local orders demo](examples/demo/README.md) to see it working in about two minutes.
 
-## Supported contract files
+## Run locally
 
-SpecGuard reads local JSON and YAML files (`.json`, `.yaml`, or `.yml`) and validates OpenAPI 3.0, 3.1, and 3.2 documents when they are loaded. Internal `$ref` references are supported. References to other files or URLs are not supported in this first slice.
+You need a local OpenAPI contract file and a running upstream service. This example assumes your contract is `openapi.yaml` and the upstream is on port 9000.
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+specguard --spec .\openapi.yaml --upstream http://127.0.0.1:9000 --port 8000
+```
+
+`python -m specguard` works the same way. Run `--help` to see all options.
+
+SpecGuard validates the contract and settings before starting the listener, so a bad contract or missing flag gives you a clear error at startup, not at runtime. Press Ctrl+C to stop. To pick up a contract change, restart the process.
+
+If your upstream URL has a base path like `/api`, SpecGuard prepends it automatically. Declare your paths in the contract without it.
+
+| Flag | Environment variable | Default |
+| --- | --- | --- |
+| `--spec` | `SPECGUARD_SPEC` | Required |
+| `--upstream` | `SPECGUARD_UPSTREAM` | Required |
+| `--host` | `SPECGUARD_HOST` | `127.0.0.1` |
+| `--port` | `SPECGUARD_PORT` | `8000` |
+| `--timeout` | `SPECGUARD_TIMEOUT` | `10` seconds |
+| `--max-request-bytes` | `SPECGUARD_MAX_REQUEST_BYTES` | `1048576` |
+| `--max-response-bytes` | `SPECGUARD_MAX_RESPONSE_BYTES` | `8388608` |
+
+Flags take priority over environment variables. You can also configure everything through the environment without any flags:
+
+```powershell
+$env:SPECGUARD_SPEC = ".\openapi.yaml"
+$env:SPECGUARD_UPSTREAM = "http://127.0.0.1:9000"
+$env:SPECGUARD_PORT = "8000"
+python -m specguard
+```
+
+These are process environment variables. `.env` files are not loaded automatically.
+
+The server uses Starlette directly rather than FastAPI. Routing and validation come from the OpenAPI contract, so FastAPI's endpoint declarations and schema generation would just be in the way.
+
+## Request logs
+
+Every request gets a UUID4 hex ID. It goes back to the client as `X-Request-ID`, gets forwarded to upstream under the same header, and appears in the log record. Any ID the client sends is replaced — this keeps the log and the response in sync.
+
+SpecGuard writes one JSON record per request to stderr:
+
+```json
+{"timestamp":"2026-11-03T18:00:00+00:00","level":"info","event":"request_finished","request_id":"23d9989203144b39911044b16363b66b","method":"post","route":"/orders","status_code":201,"duration_ms":25.0,"outcome":"upstream_response","error_code":null}
+```
+
+`method` and `route` come from the matched operation — `route` is the path template like `/orders/{order_id}`, not the actual path. Both are null if no operation matched. Paths, query strings, headers, bodies, and error messages are never logged.
+
+`duration_ms` covers the `forward()` call: parameter and body validation plus the upstream round-trip. It doesn't include reading the incoming body or sending the response back. It's null if the request stops before that point (oversized body, disconnected client).
+
+Log levels: INFO for success, WARNING for 4xx and client disconnects, ERROR for 5xx, cancellation, and send failures.
+
+`outcome` is `upstream_response` for anything that reached upstream (including upstream 4xx/5xx), `proxy_error` for requests blocked before forwarding, `client_disconnected`, `cancelled`, or `response_failed` for interrupted requests.
+
+If you're using `create_app()` directly, request records go through the `specguard.requests` logger using `specguard.request_logging.RequestFormatter`. Wire it up however fits your setup.
+
+## How validation works
+
+SpecGuard validates three things in order before forwarding: the route, the parameters, then the request body. If any step fails the request is rejected immediately and never reaches upstream.
+
+### Contract files
+
+SpecGuard reads local JSON or YAML files and supports OpenAPI 3.0, 3.1, and 3.2. Internal `$ref` references work. References to other files or URLs are not supported.
 
 ```python
 from specguard.spec_loader import load_openapi_spec
@@ -17,95 +81,11 @@ match = resolve_operation(spec, "/orders/order-42?include=items", "GET")
 print(match.path_template, match.path_parameters)
 ```
 
-`resolve_operation` raises `RouteNotFoundError` for an unmatched path and `MethodNotAllowedError` when the path exists but does not define the requested method. Both include an HTTP status code. Run SpecGuard with the CLI below, or use `UpstreamProxy` directly as a library.
+An unmatched path raises `RouteNotFoundError`. A matched path with a wrong method raises `MethodNotAllowedError`. Both carry an HTTP status code.
 
-## Run locally
+### Parameters
 
-Provide a local OpenAPI contract and a running upstream service. The example
-below assumes your contract is `openapi.yaml` and the upstream listens on port
-9000. For a complete runnable example, follow the [local orders demo](examples/demo/README.md).
-
-```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
-specguard --spec .\openapi.yaml --upstream http://127.0.0.1:9000 --port 8000
-```
-
-`python -m specguard` accepts the same arguments as `specguard`. Use `--help` to
-see all options. Send requests to `http://127.0.0.1:8000` using the paths declared
-in your contract. If the upstream base URL includes a prefix such as `/api`,
-declare the paths without that prefix; the forwarding layer prepends it.
-
-The contract and configuration are checked before the listener starts. Missing
-or invalid contracts and settings produce an actionable startup error and a
-nonzero exit code. Press Ctrl+C to stop; shutdown closes the shared upstream
-client. Restart the process after changing the contract. Hot reload is not
-enabled in this milestone.
-
-| CLI flag | Environment variable | Default |
-| --- | --- | --- |
-| `--spec` | `SPECGUARD_SPEC` | Required |
-| `--upstream` | `SPECGUARD_UPSTREAM` | Required |
-| `--host` | `SPECGUARD_HOST` | `127.0.0.1` |
-| `--port` | `SPECGUARD_PORT` | `8000` |
-| `--timeout` | `SPECGUARD_TIMEOUT` | `10` seconds |
-| `--max-request-bytes` | `SPECGUARD_MAX_REQUEST_BYTES` | `1048576` |
-| `--max-response-bytes` | `SPECGUARD_MAX_RESPONSE_BYTES` | `8388608` |
-
-Flags override environment variables. Environment-only startup works too:
-
-```powershell
-$env:SPECGUARD_SPEC = ".\openapi.yaml"
-$env:SPECGUARD_UPSTREAM = "http://127.0.0.1:9000"
-$env:SPECGUARD_PORT = "8000"
-python -m specguard
-```
-
-These are process environment variables; `.env` files are not loaded automatically.
-The server runs as one process, binds to loopback by default, and accepts HTTP
-requests for contract routes. Uvicorn access logs are disabled; SpecGuard emits
-the structured request records described below. HTTP-to-WebSocket upgrades are not enabled, and the server
-does not add a dashboard, documentation routes, or health endpoints.
-
-The proxy adapter uses Starlette directly because routing and validation come from the supplied OpenAPI contract, so FastAPI's endpoint declarations and schema generation would duplicate that work.
-
-## Request logs and IDs
-
-The CLI writes one JSON record per HTTP request to stderr. Each request gets a
-new UUID4 hex ID, returned as `X-Request-ID` and sent to upstream under the same
-header. Client-supplied IDs, including duplicates, are replaced; upstream response
-IDs are also replaced so the response always agrees with the request log.
-The generated header is included in upstream request-header validation.
-
-```json
-{"timestamp":"2026-11-03T18:00:00+00:00","level":"info","event":"request_finished","request_id":"23d9989203144b39911044b16363b66b","method":"post","route":"/orders","status_code":201,"duration_ms":25.0,"outcome":"upstream_response","error_code":null}
-```
-
-`method` is the matched contract method and `route` is its path template, such
-as `/orders/{order_id}`. Both are null when no operation was matched. Logs omit
-raw paths, queries, headers, bodies, and exception messages. `duration_ms` measures
-the call to `proxy.forward()`, including validation and the upstream exchange;
-it excludes reading the incoming body and sending the response. It is null if
-the request stops before that call, such as an oversized upload or disconnect.
-
-Successful responses use INFO, 4xx responses and client disconnects use WARNING,
-and 5xx responses, cancellation, and response-send failures use ERROR. `outcome`
-distinguishes `upstream_response` (including upstream 4xx/5xx) from `proxy_error`;
-proxy errors also include the stable envelope `error_code`. Interrupted requests
-use `client_disconnected`, `cancelled`, or `response_failed`; `status_code` is
-null until a response is prepared and does not guarantee delivery to the client.
-
-Uvicorn lifecycle messages retain their standard format. Applications embedding
-`create_app()` control their own logging configuration; request records use the
-`specguard.requests` logger and `specguard.request_logging.RequestFormatter`.
-
-## Request parameter validation
-
-`validate_parameters` routes a request, combines Path Item and operation parameters
-(operation definitions override the same name and location), and returns typed
-path, query, header, and cookie values. Header lookup is case-insensitive. Missing optional
-parameters are omitted; defaults are not injected and inputs are not modified.
+`validate_parameters` checks path, query, header, and cookie parameters against the contract. It returns typed values — integers, booleans, arrays, objects — without modifying the input or injecting defaults.
 
 ```python
 from specguard.parameters import validate_parameters
@@ -116,53 +96,20 @@ parameters = validate_parameters(
 print(parameters.path, parameters.query, parameters.headers, parameters.cookies)
 ```
 
-Parameters support primitive types, arrays, objects, nullable values, type lists,
-and `allOf`/`anyOf`/`oneOf`. Required values, schema constraints, and known formats
-are checked using the contract's OpenAPI version. Local JSON Pointer parameter
-and schema references are supported. Strings are preserved when a union permits
-them; otherwise possible conversions are checked against the complete schema.
-For example, `oneOf` still rejects a converted value matching multiple branches.
+Supported parameter styles:
 
-Supported styles:
+- Path: `simple`, `label`, `matrix` (both explode settings)
+- Query: `form`, `spaceDelimited`, `pipeDelimited`, `deepObject`
+- Header: `simple`
+- Cookie: `form`
 
-- Path: `simple`, `label`, and `matrix`, with either explode setting.
-- Query: `form`, `spaceDelimited`, `pipeDelimited`, and `deepObject`.
-- Header: `simple`.
-- Cookie: `form`, using semicolon-separated cookie pairs. Exploded arrays use
-  repeated cookie names; exploded objects use property names as cookie names.
+Type coercion follows the schema. Strings stay strings when the schema allows them. `oneOf` rejects a value that matches more than one branch. Encoded delimiters stay as data. Repeated scalar parameters are rejected. Undeclared parameters are ignored unless the schema is free-form.
 
-Encoded commas, dots, and semicolons remain data when splitting structural
-delimiters. Space/pipe query delimiters accept their percent-encoded forms; data
-that collides with those delimiters must be pre-encoded as described by OpenAPI.
-Cookie values use percent-decoding without replacing plus signs with spaces;
-header values are not percent-decoded. Repeated scalar parameters and repeated
-object properties are rejected. Undeclared parameters are ignored, except fields
-belonging to free-form exploded objects. Other declared parameters' names and
-object properties are excluded from free-form object collection.
-Repeated array or object header lines are combined in their original order;
-scalar header parameters still reject duplicate lines. Referenced and composed
-closed objects ignore unrelated query fields in the same way as inline objects.
+`ParameterValidationError` (400) lists every issue found, not just the first. An invalid style combination raises `ParameterDefinitionError` — that's a contract problem, not a bad request.
 
-Content-encoded parameters support JSON (including `+json` media types) and
-`text/plain`. JSON supports nested arrays and objects without coercing JSON
-strings into numbers. Other media types can supply a callable through the
-`content_decoders` mapping; decoded values still undergo schema validation.
-JSON numeric overflow is rejected, including inside nested objects and arrays.
+### Request body
 
-`ParameterValidationError` carries a tuple of location/name/message issues and a
-400 status code. Routing errors retain their existing behavior. Invalid or
-undefined style combinations raise `ParameterDefinitionError`, including
-`deepObject` without `explode=true` and exploded space/pipe styles. OpenAPI does
-not define nested `deepObject` property serialization; use JSON content for nested
-objects or arrays. Conversion is bounded to 32 nesting levels and 128 typed
-interpretations per parameter. OpenAPI's reserved Accept, Content-Type, and
-Authorization header parameter definitions are ignored.
-
-## JSON request body validation
-
-`validate_request_body` routes a request, checks the operation's request body,
-and returns the parsed JSON value. The caller supplies raw UTF-8 bytes (or text)
-and the Content-Type separately.
+`validate_request_body` checks the request body against the contract's schema. It returns the parsed value. The forwarding layer sends the original bytes, not the parsed result.
 
 ```python
 from specguard.request_body import validate_request_body
@@ -177,58 +124,15 @@ body = validate_request_body(
 print(body.present, body.value)
 ```
 
-Required bodies reject missing or zero-length input. Optional bodies can be
-absent; whitespace is a present, invalid JSON body. JSON `null` is also present
-and must satisfy the schema. Bodies supplied to operations without a request-body
-declaration are rejected. Validation does not coerce values, insert defaults,
-change the contract, or modify the original body.
+Required bodies reject missing or empty input. Optional bodies can be absent. JSON `null` counts as present and must satisfy the schema. A body sent to an operation that doesn't declare one is rejected.
 
-Supported media types are JSON and declared `+json` types. Content-Type matching
-is case-insensitive and ignores parameters such as `charset=utf-8`; bytes must
-always be UTF-8. An exact content entry wins over `type/*`, which wins over `*/*`.
-An `application/json` declaration does not implicitly permit every `+json` type.
-Non-JSON bodies, form data, multipart uploads, and streaming JSON are not
-supported in this milestone.
+Only JSON content types are supported (`application/json` and `+json` variants). The Content-Type match is case-insensitive and ignores `charset` parameters. An exact match wins over `type/*`, which wins over `*/*`.
 
-Schema validation uses the contract's OpenAPI 3.0, 3.1, or 3.2 rules and known
-format checks. It covers nested objects and arrays, required properties, types,
-enums, bounds, string constraints, and composed schemas. Internal request-body,
-schema, and OpenAPI 3.2 media-type references are supported; external references
-remain unsupported. OpenAPI 3.0 bodies use request-specific readOnly/writeOnly
-rules. In 3.1 and 3.2 those keywords retain the library's annotation semantics.
+`BodyValidationError` (400) includes a path for each issue — field names and array indexes relative to the JSON root. `UnsupportedMediaTypeError` is 415.
 
-`BodyValidationError` has status code 400 and an `issues` tuple of `BodyIssue`
-records. Each issue contains a `path` tuple of field names and array indexes,
-plus a message. Malformed JSON, invalid UTF-8, and nonfinite numbers (including
-overflow inside nested values) are rejected. `UnsupportedMediaTypeError` is a
-body-validation error with status code 415. Unresolved contract references raise
-`BodyDefinitionError`; routing errors retain their existing behavior. The
-contract should be loaded and validated before validating requests.
+## Error responses
 
-The parsed value is for validation and inspection. The forwarding layer sends
-the original body bytes without reserializing the parsed JSON.
-
-## Consistent validation errors
-
-`error_response` converts parameter and body validation exceptions into a common,
-JSON-serializable error envelope. The response's `status_code` is separate from
-its JSON payload so an HTTP adapter can set the response status directly.
-
-```python
-from specguard.errors import error_response
-from specguard.parameters import ParameterValidationError, validate_parameters
-from specguard.request_body import BodyValidationError, validate_request_body
-
-try:
-    validate_parameters(spec, target, method, headers)
-    validate_request_body(spec, target, method, raw_body, content_type=content_type)
-except (ParameterValidationError, BodyValidationError) as exc:
-    response = error_response(exc)
-    status = response.status_code
-    payload = response.to_dict()
-```
-
-A missing required query parameter produces status 400 and this payload:
+All validation errors use the same envelope:
 
 ```json
 {
@@ -248,41 +152,23 @@ A missing required query parameter produces status 400 and this payload:
 }
 ```
 
-Every envelope has `error.code`, `error.message`, and an `error.details` array.
-Every detail has `location`, `name`, `path`, `code`, and `message`. Parameter
-details identify the location and parameter name, with an empty path. Body
-details use location `body`, name `null`, and a path of field names and array
-indexes relative to the JSON root. Missing-property errors identify their
-containing object, as reported by the schema validator.
-
-| Exception | HTTP status | Error code |
+| Exception | Status | Code |
 | --- | --- | --- |
 | `ParameterValidationError` | 400 | `parameter_validation_failed` |
 | `BodyValidationError` | 400 | `body_validation_failed` |
 | `UnsupportedMediaTypeError` | 415 | `unsupported_media_type` |
-| Contract or unexpected exceptions | 500 | `internal_error` |
+| `RouteNotFoundError` | 404 | `route_not_found` |
+| `MethodNotAllowedError` | 405 | `method_not_allowed` |
+| `RequestTooLargeError` | 413 | `request_too_large` |
+| `UpstreamError` | 502 | `upstream_error` |
+| `UpstreamTimeoutError` | 504 | `upstream_timeout` |
+| Contract or unexpected errors | 500 | `internal_error` |
 
-Client-facing messages come from a fixed set, including codes for missing values,
-types, enums, formats, common constraints, JSON syntax, and text encoding. Other
-detail codes fall back to `invalid_value`. Raw schema messages, submitted values,
-decoder exceptions, and stack traces are not included in response messages.
-Existing exception `issues` and diagnostic strings remain available to callers;
-serialize the envelope instead of sending `str(exc)` to clients.
+Error messages come from a fixed list. Raw schema messages, submitted values, and stack traces are never included in client responses. The 500 envelope is always generic.
 
-Contract and unexpected exceptions passed to `error_response` produce a generic
-500 envelope with an empty details array. Handle and log the original exception
-on the server as appropriate. Routing errors retain their exception types; the
-HTTP adapter maps them to the same envelope using `route_not_found` (404),
-`method_not_allowed` (405), and `invalid_request_target` (400). A 405 response
-includes the Allow header. Unexpected server failures return a generic 500
-envelope without exception text or stack traces.
+## Forwarding
 
-## Forwarding validated requests
-
-`UpstreamProxy` owns a reusable async HTTP client. Each `forward` call validates
-the operation, parameters, and JSON body before sending anything upstream.
-Load and validate the contract with `load_openapi_spec` before constructing the
-proxy. The upstream base URL is configured by the operator, not by the caller.
+`UpstreamProxy` owns one async HTTP client shared across requests. Each `forward()` call validates the request first, then sends it.
 
 ```python
 import asyncio
@@ -310,54 +196,13 @@ async def main():
 asyncio.run(main())
 ```
 
-Pass origin-form request targets beginning with `/`. A configured base path is
-prepended, so `/orders` above reaches `/api/orders`. Leading double slashes,
-percent-encoded values, duplicate query parameters, and original body bytes are
-preserved. Unicode targets are percent-encoded before validation and forwarding.
-Absolute request URLs, fragments, backslashes, control characters, and dot path
-segments are rejected rather than reinterpreted. The method's capitalization is
-preserved, including custom methods. Request bodies must be bytes.
+Request targets must be origin-form (starting with `/`). Encoded values, double slashes, and duplicate query parameters are preserved. Dot segments, fragments, backslashes, and control characters are rejected.
 
-Request and response hop-by-hop headers are removed, including fields nominated
-by any `Connection` header. The outbound Host is set for the configured upstream,
-and Content-Length is recalculated from the buffered body. Validation sees those
-outbound headers, so a Connection-nominated field cannot pass validation and then
-disappear upstream. Ordinary headers such as Authorization and Cookie are passed
-through. Duplicate Content-Type fields and non-identity request Content-Encoding
-are rejected. Response headers are retained as a tuple of byte pairs, preserving
-duplicates such as Set-Cookie. Compressed response bytes and their Content-Encoding
-remain together; the proxy does not decompress or reserialize the response.
+Hop-by-hop headers are stripped both ways, including anything nominated by a `Connection` header. The outbound `Host` and `Content-Length` are set by the proxy. Upstream cookies are not stored or replayed between requests. Redirects and retries are disabled.
 
-Redirects and automatic retries are disabled. The client does not retain or
-replay upstream cookies between callers, use environment proxy settings, or
-disable TLS verification. Optional parameter media-type decoders can be supplied
-through `UpstreamProxy(..., content_decoders=...)`, just as with `validate_parameters`.
+Compressed responses come back as-is — SpecGuard doesn't decompress or re-encode them.
 
-Defaults are a 10-second timeout, a 1 MiB request-body cap, and an 8 MiB response-body
-cap. The timeout bounds the upstream exchange, including reading the response;
-HTTPX also applies connect, read, write, and pool timeouts. Oversized requests are
-blocked before validation or transmission. Responses are read as raw chunks up to
-the configured cap and the stream is closed on completion or failure. Upstream
-4xx/5xx statuses and redirect responses are returned unchanged, rather than
-treated as transport failures.
-
-| Exception | Status | Envelope code |
-| --- | --- | --- |
-| `ProxyRequestError` | 400 | `invalid_proxy_request` |
-| `RequestTooLargeError` | 413 | `request_too_large` |
-| `UnsupportedContentEncodingError` | 415 | `unsupported_content_encoding` |
-| `UpstreamError` | 502 | `upstream_error` |
-| `UpstreamResponseTooLargeError` | 502 | `upstream_response_too_large` |
-| `UpstreamTimeoutError` | 504 | `upstream_timeout` |
-
-These exceptions work with `error_response`; upstream failure envelopes omit
-private connection details. Existing parameter/body validation errors and routing
-exceptions still propagate without an upstream call. The HTTP adapter sets the
-response status, preserves response header pairs, and writes the returned body
-bytes. It enforces the request-size cap while receiving chunks, even without
-Content-Length. Disconnected clients are not forwarded. This implementation
-buffers bodies; it does not provide streaming uploads, WebSockets, or
-response-schema validation.
+The defaults are 10s timeout, 1 MiB request cap, 8 MiB response cap.
 
 ## Development
 
