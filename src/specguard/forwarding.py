@@ -141,7 +141,7 @@ class UpstreamProxy:
         self,
         request_target: str,
         request_method: str,
-        headers: Mapping[str, str] | Sequence[tuple[str, str]] = (),
+        headers: Mapping[str, str] | Sequence[tuple[str, str]] | Sequence[tuple[bytes, bytes]] = (),
         body: bytes = b"",
     ) -> UpstreamResponse:
         if self._client is None:

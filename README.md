@@ -17,7 +17,58 @@ match = resolve_operation(spec, "/orders/order-42?include=items", "GET")
 print(match.path_template, match.path_parameters)
 ```
 
-`resolve_operation` raises `RouteNotFoundError` for an unmatched path and `MethodNotAllowedError` when the path exists but does not define the requested method. Both include an HTTP status code. The library now forwards validated requests through `UpstreamProxy`; a listening HTTP server and CLI are later roadmap steps.
+`resolve_operation` raises `RouteNotFoundError` for an unmatched path and `MethodNotAllowedError` when the path exists but does not define the requested method. Both include an HTTP status code. Run SpecGuard with the CLI below, or use `UpstreamProxy` directly as a library.
+
+## Run locally
+
+Provide a local OpenAPI contract and a running upstream service. The example
+below assumes your contract is `openapi.yaml` and the upstream listens on port
+9000. A bundled sample contract and demo service are the next roadmap milestone.
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+specguard --spec .\openapi.yaml --upstream http://127.0.0.1:9000 --port 8000
+```
+
+`python -m specguard` accepts the same arguments as `specguard`. Use `--help` to
+see all options. Send requests to `http://127.0.0.1:8000` using the paths declared
+in your contract. If the upstream base URL includes a prefix such as `/api`,
+declare the paths without that prefix; the forwarding layer prepends it.
+
+The contract and configuration are checked before the listener starts. Missing
+or invalid contracts and settings produce an actionable startup error and a
+nonzero exit code. Press Ctrl+C to stop; shutdown closes the shared upstream
+client. Restart the process after changing the contract. Hot reload is not
+enabled in this milestone.
+
+| CLI flag | Environment variable | Default |
+| --- | --- | --- |
+| `--spec` | `SPECGUARD_SPEC` | Required |
+| `--upstream` | `SPECGUARD_UPSTREAM` | Required |
+| `--host` | `SPECGUARD_HOST` | `127.0.0.1` |
+| `--port` | `SPECGUARD_PORT` | `8000` |
+| `--timeout` | `SPECGUARD_TIMEOUT` | `10` seconds |
+| `--max-request-bytes` | `SPECGUARD_MAX_REQUEST_BYTES` | `1048576` |
+| `--max-response-bytes` | `SPECGUARD_MAX_RESPONSE_BYTES` | `8388608` |
+
+Flags override environment variables. Environment-only startup works too:
+
+```powershell
+$env:SPECGUARD_SPEC = ".\openapi.yaml"
+$env:SPECGUARD_UPSTREAM = "http://127.0.0.1:9000"
+$env:SPECGUARD_PORT = "8000"
+python -m specguard
+```
+
+These are process environment variables; `.env` files are not loaded automatically.
+The server runs as one process, binds to loopback by default, and accepts HTTP
+requests for contract routes. Access logs are disabled so raw query strings are
+not written to logs. HTTP-to-WebSocket upgrades are not enabled, and the server
+does not add a dashboard, documentation routes, or health endpoints.
+
+The proxy adapter uses Starlette directly because routing and validation come from the supplied OpenAPI contract, so FastAPI's endpoint declarations and schema generation would duplicate that work.
 
 ## Request parameter validation
 
@@ -190,9 +241,11 @@ serialize the envelope instead of sending `str(exc)` to clients.
 
 Contract and unexpected exceptions passed to `error_response` produce a generic
 500 envelope with an empty details array. Handle and log the original exception
-on the server as appropriate. Routing errors retain their current API and are
-outside this increment's adapter; map them separately when adding the HTTP layer.
-This error adapter does not start a server.
+on the server as appropriate. Routing errors retain their exception types; the
+HTTP adapter maps them to the same envelope using `route_not_found` (404),
+`method_not_allowed` (405), and `invalid_request_target` (400). A 405 response
+includes the Allow header. Unexpected server failures return a generic 500
+envelope without exception text or stack traces.
 
 ## Forwarding validated requests
 
@@ -269,11 +322,12 @@ treated as transport failures.
 
 These exceptions work with `error_response`; upstream failure envelopes omit
 private connection details. Existing parameter/body validation errors and routing
-exceptions still propagate without an upstream call. A future HTTP adapter should
-set the response status, pass through the returned header pairs, and write the
-returned body bytes. This milestone buffers bodies; it does not provide streaming
-uploads, WebSockets, response-schema validation, or a listening server. Enforce
-the request-size cap while receiving data when the server adapter is added.
+exceptions still propagate without an upstream call. The HTTP adapter sets the
+response status, preserves response header pairs, and writes the returned body
+bytes. It enforces the request-size cap while receiving chunks, even without
+Content-Length. Disconnected clients are not forwarded. This implementation
+buffers bodies; it does not provide streaming uploads, WebSockets, or
+response-schema validation.
 
 ## Development
 

@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Any
 
+from specguard.routing import InvalidRequestTargetError, MethodNotAllowedError, RouteNotFoundError
+
 _DETAIL_MESSAGES = {
     "invalid_value": "Value does not satisfy the contract.",
     "required": "Required value is missing.",
@@ -85,4 +87,10 @@ def error_response(error: Exception) -> ErrorResponse:
     """Expose known request errors; keep contract and unexpected failures private."""
     if isinstance(error, (RequestValidationError, UpstreamError)):
         return ErrorResponse(error.status_code, error.code, error.public_message, error.details)
+    if isinstance(error, RouteNotFoundError):
+        return ErrorResponse(404, "route_not_found", "No matching operation was found.")
+    if isinstance(error, MethodNotAllowedError):
+        return ErrorResponse(405, "method_not_allowed", "The request method is not allowed.")
+    if isinstance(error, InvalidRequestTargetError):
+        return ErrorResponse(400, "invalid_request_target", "The request target is invalid.")
     return ErrorResponse(500, "internal_error", "An internal error occurred.")

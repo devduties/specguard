@@ -16,7 +16,12 @@ dependencies = [
   "openapi-spec-validator>=0.9,<1",
   "PyYAML>=6,<7",
   "referencing>=0.37,<0.38",
+  "starlette>=0.48,<1",
+  "uvicorn>=0.35,<1",
 ]
+
+[project.scripts]
+specguard = "specguard.cli:main"
 
 [project.optional-dependencies]
 dev = [
