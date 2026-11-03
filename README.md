@@ -178,6 +178,10 @@ Error messages come from a fixed list. Schema messages, submitted values, and st
 
 `UpstreamProxy` holds one HTTP client shared across requests. Each `forward()` call validates the request first, then sends it.
 
+Standard HTTP methods are normalized to uppercase before validation and forwarding.
+Custom methods declared in `additionalOperations`, such as `Copy`, keep their casing
+and remain case-sensitive.
+
 ```python
 import asyncio
 

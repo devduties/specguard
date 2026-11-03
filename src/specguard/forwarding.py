@@ -16,6 +16,7 @@ import httpx
 from specguard.errors import RequestValidationError, UpstreamError
 from specguard.parameters import validate_parameters
 from specguard.request_body import validate_request_body
+from specguard.routing import _HTTP_METHODS
 
 _HOP_HEADERS = {
     b"connection",
@@ -152,6 +153,9 @@ class UpstreamProxy:
             raise RequestTooLargeError("Request body exceeds the configured size limit.")
         if not _TOKEN.fullmatch(request_method):
             raise ProxyRequestError("Invalid request method.")
+        # Normalize standard methods before validation and sending; custom methods keep casing.
+        if request_method.lower() in _HTTP_METHODS:
+            request_method = request_method.upper()
         target = _origin_target(request_target)
         prefix = self._base_url.raw_path.rstrip(b"/")
         url = self._base_url.copy_with(raw_path=prefix + target.encode("ascii"))

@@ -428,7 +428,11 @@ def test_leading_slashes_and_encoded_paths_keep_the_configured_upstream(target, 
     assert sent[0].url.raw_path == expected
 
 
-def test_custom_method_capitalization_is_preserved():
+@pytest.mark.parametrize(
+    "method", ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "QUERY"]
+)
+@pytest.mark.parametrize("casing", [str.lower, str.title, str.upper])
+def test_standard_methods_are_normalized_before_forwarding(method, casing):
     sent = []
 
     def receiver(request):
@@ -436,14 +440,53 @@ def test_custom_method_capitalization_is_preserved():
         return upstream_response()
 
     async def exercise():
-        doc = {"paths": {"/items": {"additionalOperations": {"Copy": {}}}}}
+        document = {"paths": {"/items": {method.lower(): {}}}}
+        async with UpstreamProxy(
+            document,
+            ProxySettings("https://upstream.test"),
+            transport=httpx.MockTransport(receiver),
+        ) as proxy:
+            return await proxy.forward("/items", casing(method))
+
+    assert asyncio.run(exercise()).status_code == 200
+    assert sent == [method]
+
+
+@pytest.mark.parametrize("method", ["Copy", "COPY", "copy"])
+def test_custom_method_capitalization_is_preserved(method):
+    sent = []
+
+    def receiver(request):
+        sent.append(request.method)
+        return upstream_response()
+
+    async def exercise():
+        doc = {"paths": {"/items": {"additionalOperations": {method: {}}}}}
         async with UpstreamProxy(
             doc, ProxySettings("https://upstream.test"), transport=httpx.MockTransport(receiver)
         ) as proxy:
-            await proxy.forward("/items", "Copy")
+            await proxy.forward("/items", method)
 
     asyncio.run(exercise())
-    assert sent == ["Copy"]
+    assert sent == [method]
+
+
+@pytest.mark.parametrize("method", ["copy", "COPY"])
+def test_custom_methods_do_not_match_a_differently_cased_operation(method):
+    def receiver(request):
+        pytest.fail("Mismatched custom method reached upstream")
+
+    async def exercise():
+        document = {"paths": {"/items": {"additionalOperations": {"Copy": {}}}}}
+        async with UpstreamProxy(
+            document,
+            ProxySettings("https://upstream.test"),
+            transport=httpx.MockTransport(receiver),
+        ) as proxy:
+            with pytest.raises(MethodNotAllowedError):
+                await proxy.forward("/items", method)
+
+    asyncio.run(exercise())
 
 
 def test_forwarding_uses_custom_parameter_decoders_before_sending():

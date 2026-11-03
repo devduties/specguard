@@ -85,7 +85,7 @@ async def _forward_request(scope: Scope, receive: Receive, send: Send) -> None:
         # Replace any upstream ID, including duplicates, so the log and client agree.
         response.headers["X-Request-ID"] = request_id
         status_code = response.status_code
-        if request.method == "HEAD":
+        if request.method.upper() == "HEAD":
             response.body = b""
         await response(scope, receive, send)
         outcome = response_outcome

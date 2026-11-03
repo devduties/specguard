@@ -309,9 +309,11 @@ def test_raw_encoded_path_is_not_decoded_twice_and_custom_methods_are_supported(
     assert received == [("GET", b"/files/a%252Fb"), ("Copy", b"/custom")]
 
 
-def test_head_has_no_body_and_keeps_upstream_representation_length(spec_path):
+@pytest.mark.parametrize("method", ["HEAD", "head", "HeAd"])
+def test_head_has_no_body_and_keeps_upstream_representation_length(spec_path, method):
     def receiver(request):
-        return response(b"", 200, {"Content-Length": "123", "Content-Type": "text/plain"})
+        assert request.method == "HEAD"
+        return response(b"ignored", 200, {"Content-Length": "123", "Content-Type": "text/plain"})
 
     app = create_app(
         ServerSettings(spec_path, ProxySettings("http://up.test")),
@@ -323,7 +325,9 @@ def test_head_has_no_body_and_keeps_upstream_representation_length(spec_path):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://proxy.test"
             ) as client:
-                return await client.head("/items/1")
+                request = client.build_request("HEAD", "/items/1")
+                request.method = method
+                return await client.send(request)
 
     result = asyncio.run(exercise())
     assert result.content == b""
