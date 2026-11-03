@@ -1,5 +1,7 @@
 # SpecGuard
 
+[![CI](https://github.com/devduties/specguard/actions/workflows/ci.yml/badge.svg)](https://github.com/devduties/specguard/actions/workflows/ci.yml)
+
 SpecGuard sits in front of your API and checks every request against an OpenAPI contract before it reaches your service. Valid requests go through; invalid ones get a clear error response and never touch the upstream.
 
 Run the [local orders demo](examples/demo/README.md) to see it working in about two minutes.
@@ -211,6 +213,10 @@ Compressed responses come back as-is. SpecGuard doesn't decompress or re-encode 
 The defaults are a 10-second timeout, a 1 MB request cap, and an 8 MB response cap.
 
 ## Development
+
+CI runs Ruff followed by the full test suite on Python 3.11 and 3.12 using
+Ubuntu. It runs on pushes to main and pull requests targeting main, with pip
+downloads cached by Python version and the `pyproject.toml` hash.
 
 ```powershell
 py -m venv .venv
