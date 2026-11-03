@@ -33,6 +33,8 @@ If your upstream URL has a base path like `/api`, SpecGuard prepends it automati
 | `--max-request-bytes` | `SPECGUARD_MAX_REQUEST_BYTES` | `1048576` |
 | `--max-response-bytes` | `SPECGUARD_MAX_RESPONSE_BYTES` | `8388608` |
 
+SpecGuard has no authentication. The default `--host 127.0.0.1` keeps it on localhost. If you bind it to `0.0.0.0` or any public address, put it behind a reverse proxy or firewall that handles access control before any traffic reaches it.
+
 Flags take priority over environment variables. You can also configure everything through the environment without any flags:
 
 ```powershell
